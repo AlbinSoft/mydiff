@@ -1,0 +1,13 @@
+# Evita listar el contenido del directorio
+Options -Indexes
+
+# Bloquea el acceso directo a ficheros de datos/documentación por URL
+<FilesMatch "\.(json|md|log)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>

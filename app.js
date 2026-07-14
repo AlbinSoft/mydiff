@@ -26,12 +26,35 @@ async function api(action, body = {}) {
         body:    JSON.stringify(body),
     });
     const json = await res.json();
-    if (!json.ok) throw new Error(json.error ?? 'Error desconocido');
+    if (!json.ok) {
+        if (json.code === 'auth_required') authenticated.value = false;
+        throw new Error(json.error ?? 'Error desconocido');
+    }
     return json.data;
 }
 
 function b64sql(sql) {
     return btoa(unescape(encodeURIComponent(sql)));
+}
+
+// ─── AUTH STATE ───────────────────────────────────────────────────────────────
+
+const authenticated  = signal(null);   // null = comprobando sesión | true | false
+const authConfigured = signal(true);   // se ajusta tras session_check
+
+async function checkSession() {
+    try {
+        const d = await api('session_check');
+        authConfigured.value = d.configured;
+        authenticated.value  = d.authenticated;
+    } catch {
+        authenticated.value = false;
+    }
+}
+
+async function doLogout() {
+    try { await api('logout'); } catch {}
+    authenticated.value = false;
 }
 
 // ─── STATE ────────────────────────────────────────────────────────────────────
@@ -913,6 +936,7 @@ function Header() {
                 <circle cx="9" cy="9" r="8" stroke="#FF2777" stroke-width="1.5"/>
                 <text x="9" y="13.5" text-anchor="middle" fill="#FF2777" font-family="Inter" font-size="11">!</text>
             </svg>
+            <button class="btn btn-pill" title="Cerrar sesión" onClick=${doLogout}>Salir</button>
         </div>
     </header>`;
 }
@@ -1305,9 +1329,57 @@ function ConsolePanel() {
     </div>`;
 }
 
+// ─── LOGIN ────────────────────────────────────────────────────────────────────
+
+function LoginScreen() {
+    const configuring = !authConfigured.value;
+    const [password, setPassword] = useState('');
+    const [confirm, setConfirm]   = useState('');
+    const [msg, setMsg]           = useState(null);
+    const [busy, setBusy]         = useState(false);
+
+    async function submit(e) {
+        e.preventDefault();
+        if (configuring && password !== confirm) { setMsg('Las contraseñas no coinciden'); return; }
+        setBusy(true); setMsg(null);
+        try {
+            await api('login', { password });
+            authConfigured.value = true;
+            authenticated.value  = true;
+        } catch (err) {
+            setMsg(err.message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    return html`<div class="login-page">
+        <form class="modal" onSubmit=${submit}>
+            <div class="modal-title">${configuring ? 'Establece la contraseña de acceso' : 'MyDiff'}</div>
+            <div class="field">
+                <label>Contraseña</label>
+                <input type="password" value=${password} autofocus
+                    onInput=${e => setPassword(e.target.value)}
+                    autocomplete=${configuring ? 'new-password' : 'current-password'} />
+            </div>
+            ${configuring && html`<div class="field">
+                <label>Repite la contraseña</label>
+                <input type="password" value=${confirm}
+                    onInput=${e => setConfirm(e.target.value)} autocomplete="new-password" />
+            </div>`}
+            ${msg && html`<div class="test-msg err">✗ ${msg}</div>`}
+            <div class="modal-actions">
+                <button type="submit" class="btn btn-accent" disabled=${busy || !password}>
+                    ${busy ? '…' : (configuring ? 'Crear contraseña' : 'Entrar')}
+                </button>
+            </div>
+        </form>
+    </div>`;
+}
+
 // ─── APP ──────────────────────────────────────────────────────────────────────
 
-function App() {
+function MainApp() {
     useEffect(() => {
         loadConnections().then(restoreState);
 
@@ -1340,6 +1412,14 @@ function App() {
         ${schemaMergeOpen.value && html`<${SchemaMergeDialog} />`}
         ${routineDiff.value    && html`<${RoutineDiffDialog} />`}
     </${Fragment}>`;
+}
+
+function App() {
+    useEffect(() => { checkSession(); }, []);
+
+    if (authenticated.value === null) return html`<div class="login-page"></div>`;
+    if (!authenticated.value)         return html`<${LoginScreen} />`;
+    return html`<${MainApp} />`;
 }
 
 // ─── BOOTSTRAP ────────────────────────────────────────────────────────────────

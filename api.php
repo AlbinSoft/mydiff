@@ -1,15 +1,47 @@
 <?php
 header('Content-Type: application/json; charset=utf-8');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: no-referrer');
 
-const CONN_FILE = __DIR__ . '/connections.json';
+const CONN_FILE     = __DIR__ . '/connections.data.php';
+const CONN_FILE_OLD = __DIR__ . '/connections.json';
+const AUTH_FILE     = __DIR__ . '/auth_config.php';
+
+function atomicWrite(string $path, string $content): void {
+    // Escribe a un temporal y renombra: evita dejar el fichero real a medias
+    // si la escritura se interrumpe (visto en algunos hostings compartidos).
+    $tmp = $path . '.' . uniqid('', true) . '.tmp';
+    if (file_put_contents($tmp, $content) === false) {
+        throw new RuntimeException("No se pudo escribir el fichero temporal de $path");
+    }
+    if (!rename($tmp, $path)) {
+        @unlink($tmp);
+        throw new RuntimeException("No se pudo actualizar $path");
+    }
+}
 
 function readConns(): array {
-    if (!file_exists(CONN_FILE)) return [];
-    return json_decode(file_get_contents(CONN_FILE), true) ?? [];
+    if (file_exists(CONN_FILE)) {
+        $data = include CONN_FILE;
+        // Fichero corrupto o vacío (p.ej. 0 bytes): se trata como si no hubiera conexiones
+        return is_array($data) ? $data : [];
+    }
+    if (file_exists(CONN_FILE_OLD)) {
+        // Migración única desde el formato JSON antiguo (legible en texto plano si se descarga)
+        $legacy = json_decode(file_get_contents(CONN_FILE_OLD), true);
+        $legacy = is_array($legacy) ? $legacy : [];
+        writeConns($legacy);
+        @unlink(CONN_FILE_OLD);
+        return $legacy;
+    }
+    return [];
 }
 
 function writeConns(array $c): void {
-    file_put_contents(CONN_FILE, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    // .php en vez de .json: si alguien pide el fichero por URL, el servidor lo ejecuta
+    // (salida vacía) en lugar de servir las credenciales en texto plano.
+    atomicWrite(CONN_FILE, "<?php\nreturn " . var_export($c, true) . ";\n");
 }
 
 function findConn(array $conns, string $id): ?array {
@@ -60,14 +92,103 @@ function viewBody(string $createSql): string {
     return preg_replace('/\s+/', ' ', trim($body));
 }
 
+// ─── Autenticación ────────────────────────────────────────────────────────────
+
+function readAuthHash(): ?string {
+    if (!file_exists(AUTH_FILE)) return null; // nunca configurado: primer login la establece
+    $cfg = include AUTH_FILE;
+    if (!is_array($cfg) || empty($cfg['password_hash'])) {
+        // El fichero existe pero está corrupto/vacío: no lo tratamos como "sin configurar"
+        // (eso reabriría la puerta a que cualquiera fije una contraseña nueva).
+        throw new RuntimeException('auth_config.php existe pero está corrupto o vacío. Revísalo en el servidor.');
+    }
+    return $cfg['password_hash'];
+}
+
+function writeAuthHash(string $hash): void {
+    atomicWrite(AUTH_FILE, "<?php\nreturn ['password_hash' => " . var_export($hash, true) . "];\n");
+}
+
+function denyAuth(): void {
+    http_response_code(401);
+    echo json_encode(['ok' => false, 'error' => 'No autenticado', 'code' => 'auth_required']);
+    exit;
+}
+
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path'     => '/',
+    'httponly' => true,
+    'samesite' => 'Strict',
+    'secure'   => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
+]);
+session_start();
+
 // ─── Acción ──────────────────────────────────────────────────────────────────
 
 $action = $_GET['action'] ?? '';
 $b      = json_decode(file_get_contents('php://input'), true) ?? [];
 
+// 'login' y 'session_check' son las únicas acciones accesibles sin sesión iniciada
+$publicActions = ['session_check', 'login'];
+if (!in_array($action, $publicActions, true) && empty($_SESSION['auth'])) {
+    denyAuth();
+}
+
 try {
 
     switch ($action) {
+
+        // ── Autenticación ────────────────────────────────────────────────────
+
+        case 'session_check':
+            ok(['authenticated' => !empty($_SESSION['auth']), 'configured' => readAuthHash() !== null]);
+
+        case 'login': {
+            $pass = (string)($b['password'] ?? '');
+            $hash = readAuthHash();
+
+            if ($hash === null) {
+                // Primer arranque: esta contraseña queda establecida como clave maestra
+                if (strlen($pass) < 8) fail('La contraseña debe tener al menos 8 caracteres');
+                writeAuthHash(password_hash($pass, PASSWORD_DEFAULT));
+                session_regenerate_id(true);
+                $_SESSION['auth'] = true;
+                ok(true);
+            }
+
+            $lockedUntil = $_SESSION['login_locked_until'] ?? 0;
+            if (time() < $lockedUntil) fail('Demasiados intentos. Espera unos segundos.');
+
+            if (password_verify($pass, $hash)) {
+                unset($_SESSION['login_attempts'], $_SESSION['login_locked_until']);
+                session_regenerate_id(true);
+                $_SESSION['auth'] = true;
+                ok(true);
+            }
+
+            $attempts = ($_SESSION['login_attempts'] ?? 0) + 1;
+            $_SESSION['login_attempts'] = $attempts;
+            if ($attempts >= 5) {
+                $_SESSION['login_locked_until'] = time() + 30;
+                $_SESSION['login_attempts']     = 0;
+            }
+            fail('Contraseña incorrecta');
+        }
+
+        case 'logout':
+            $_SESSION = [];
+            session_destroy();
+            ok(true);
+
+        case 'change_password': {
+            $hash = readAuthHash();
+            if (!$hash || !password_verify((string)($b['old_password'] ?? ''), $hash)) fail('Contraseña actual incorrecta');
+            $new = (string)($b['new_password'] ?? '');
+            if (strlen($new) < 8) fail('La nueva contraseña debe tener al menos 8 caracteres');
+            writeAuthHash(password_hash($new, PASSWORD_DEFAULT));
+            ok(true);
+        }
 
         // ── Conexiones guardadas ───────────────────────────────────────────
 

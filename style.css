@@ -57,6 +57,7 @@ body {
     margin-left: auto;
     display: flex;
     align-items: center;
+    gap: 10px;
 }
 
 /* ── Main ────────────────────────────────────────────────────────────────── */
@@ -391,6 +392,13 @@ table.diff-table {
     align-items: center;
     justify-content: center;
     z-index: 200;
+}
+
+.login-page {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .modal {

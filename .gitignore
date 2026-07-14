@@ -1,0 +1,4 @@
+# Datos con secretos: no deben versionarse
+connections.json
+connections.data.php
+auth_config.php
