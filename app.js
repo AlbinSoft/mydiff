@@ -428,6 +428,7 @@ function RoutineDiffDialog() {
     }
 
     const loading = srcSql === null || trgSql === null;
+    const same    = !loading && norm(srcSql) === norm(trgSql);
 
     const diffRows = !loading ? (() => {
         let ln = 0, rn = 0;
@@ -454,15 +455,15 @@ function RoutineDiffDialog() {
                 <div class="rdiff-header">
                     <div class="rdiff-header-side">
                         <span style="font-family:var(--code);font-size:11px;color:#888">src: ${sDb}</span>
-                        ${srcSql && hasTrg && html`
+                        ${srcSql && !same && html`
                             <button class="btn btn-sm btn-accent" disabled=${running}
-                                onClick=${() => applyTo(tId, tDb, srcSql, 'trg')}>→ aplicar en trg</button>
+                                onClick=${() => applyTo(tId, tDb, srcSql, 'trg')}>→ ${hasTrg ? 'aplicar' : 'crear'} en trg</button>
                         `}
                     </div>
                     <div class="rdiff-header-side">
-                        ${trgSql && hasSrc && html`
+                        ${trgSql && !same && html`
                             <button class="btn btn-sm btn-accent" disabled=${running}
-                                onClick=${() => applyTo(sId, sDb, trgSql, 'src')}>← aplicar en src</button>
+                                onClick=${() => applyTo(sId, sDb, trgSql, 'src')}>← ${hasSrc ? 'aplicar' : 'crear'} en src</button>
                         `}
                         <span style="font-family:var(--code);font-size:11px;color:#888">trg: ${tDb}</span>
                     </div>
