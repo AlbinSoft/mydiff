@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Los scripts de actualizacion necesitan su fin de linea nativo (tambien en el zip de GitHub)
+*.sh  text eol=lf
+*.bat text eol=crlf
