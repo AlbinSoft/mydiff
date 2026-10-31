@@ -105,6 +105,26 @@ body {
     color: var(--bright);
 }
 
+.refresh-btn {
+    width: 22px;
+    height: 22px;
+    margin-left: 10px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1;
+    opacity: .45;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.refresh-btn:hover:not(:disabled) { opacity: 1; background: var(--item); }
+.refresh-btn:disabled { opacity: .2; cursor: default; }
+
 .panel-tools {
     margin-left: auto;
     display: flex;
@@ -224,6 +244,14 @@ body {
     cursor: pointer;
 }
 .info-icon:hover { opacity: 1; background: var(--bg); }
+
+.list-icons {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+.act-icon { opacity: .75; color: #FF6600; font-size: 13px; }
 
 /* ── Tabs ────────────────────────────────────────────────────────────────── */
 
@@ -700,6 +728,38 @@ table.diff-table {
 .rdiff-ad .rdiff-code:nth-child(4) { background: rgba(74,170,74,.13);  color: #7acc7a; }
 .rdiff-ch .rdiff-code:nth-child(2) { background: rgba(255,102,0,.13);  color: #ffaa66; }
 .rdiff-ch .rdiff-code:nth-child(4) { background: rgba(255,102,0,.13);  color: #ffaa66; }
+
+/* -- Transfer data dialog -------------------------------------------------- */
+
+.transfer-modal { max-width: 560px; }
+
+.transfer-dir { display: flex; gap: 6px; }
+
+.transfer-route {
+    font-family: var(--code);
+    font-size: 11px;
+    color: #888;
+    margin-top: 4px;
+}
+
+.field label.radio-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--code);
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.transfer-where { height: 64px; }
+.transfer-where:disabled { opacity: .4; }
+
+.transfer-note {
+    font-size: 11px;
+    color: #666;
+    margin-bottom: 10px;
+}
 
 /* ── Table search ────────────────────────────────────────────────────────── */
 

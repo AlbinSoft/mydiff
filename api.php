@@ -475,10 +475,104 @@ try {
             } elseif ($type === 'PROCEDURE') {
                 $row = $p->query("SHOW CREATE PROCEDURE $nBkt")->fetch();
                 $sql = $row['Create Procedure'] ?? '';
+            } elseif ($type === 'VIEW') {
+                $row = $p->query("SHOW CREATE VIEW $nBkt")->fetch();
+                $sql = $row['Create View'] ?? '';
+            } elseif ($type === 'TABLE') {
+                $row = $p->query("SHOW CREATE TABLE $nBkt")->fetch();
+                $sql = $row['Create Table'] ?? '';
             } else {
                 fail("Tipo desconocido: $type");
             }
             ok(['sql' => $sql ?? '']);
+        }
+
+        // -- Transferencia de datos entre dos tablas ------------------------
+        // Misma conexion: INSERT ... SELECT nativo.
+        // Conexiones distintas: se lee del origen y se inserta por lotes en el destino.
+
+        case 'transfer_data': {
+            $conns   = readConns();
+            $fromId  = $b['from'] ?? '';
+            $toId    = $b['to']   ?? '';
+            $from    = findConn($conns, $fromId) ?? fail('Conexion origen no encontrada');
+            $to      = findConn($conns, $toId)   ?? fail('Conexion destino no encontrada');
+            $fromDb  = $b['from_db']    ?? '';
+            $toDb    = $b['to_db']      ?? '';
+            $fromTbl = $b['from_table'] ?? '';
+            $toTbl   = $b['to_table']   ?? '';
+            $mode    = $b['mode']       ?? '';
+            $where   = trim(base64_decode($b['where'] ?? ''));
+
+            if (!in_array($mode, ['truncate', 'ignore', 'upsert'], true)) fail("Modo desconocido: $mode");
+
+            $native = $fromId === $toId;
+            if ($native && $fromDb === $toDb && $fromTbl === $toTbl) fail('Origen y destino son la misma tabla');
+
+            $fromP = pdo($from, $fromDb);
+            $toP   = $native ? $fromP : pdo($to, $toDb);
+            $fromQ = bkt($fromDb) . '.' . bkt($fromTbl);
+            $toQ   = bkt($toDb)   . '.' . bkt($toTbl);
+
+            // Solo columnas comunes; las generadas (VIRTUAL/STORED) del destino no admiten valores
+            $fromCols = array_column($fromP->query("SHOW COLUMNS FROM $fromQ")->fetchAll(), 'Field');
+            $toCols   = [];
+            foreach ($toP->query("SHOW COLUMNS FROM $toQ")->fetchAll() as $col) {
+                if (!preg_match('/\b(VIRTUAL|STORED) GENERATED\b/i', $col['Extra'])) $toCols[] = $col['Field'];
+            }
+            $cols    = array_values(array_intersect($fromCols, $toCols));
+            $skipped = array_values(array_unique(array_merge(array_diff($fromCols, $cols), array_diff($toCols, $cols))));
+            if (!$cols) fail('Las dos tablas no tienen columnas en comun');
+
+            $colList  = implode(', ', array_map('bkt', $cols));
+            $whereSql = $where !== '' ? " WHERE $where" : '';
+            $verb     = $mode === 'ignore' ? 'INSERT IGNORE INTO' : 'INSERT INTO';
+            $dupSql   = $mode === 'upsert'
+                ? ' ON DUPLICATE KEY UPDATE ' . implode(', ', array_map(fn($c) => bkt($c) . ' = VALUES(' . bkt($c) . ')', $cols))
+                : '';
+
+            set_time_limit(0);
+            if ($mode === 'truncate') $toP->exec("TRUNCATE TABLE $toQ");
+
+            if ($native) {
+                $sql      = "$verb $toQ ($colList) SELECT $colList FROM $fromQ$whereSql$dupSql";
+                $affected = $toP->exec($sql);
+                ok(['native' => true, 'sql' => $sql, 'affected' => $affected, 'read' => null, 'skipped' => $skipped]);
+            }
+
+            // Lectura sin buffer para no cargar toda la tabla en memoria
+            $fromP->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+            $stmt  = $fromP->query("SELECT $colList FROM $fromQ$whereSql");
+
+            $nCols = count($cols);
+            $batch = max(1, min(500, intdiv(60000, $nCols)));   // MySQL admite 65535 placeholders por sentencia
+            $rowPh = '(' . implode(', ', array_fill(0, $nCols, '?')) . ')';
+
+            $flush = function(array $rows) use ($toP, $verb, $toQ, $colList, $rowPh, $dupSql): int {
+                $ins = $toP->prepare("$verb $toQ ($colList) VALUES " . implode(', ', array_fill(0, count($rows), $rowPh)) . $dupSql);
+                $ins->execute(array_merge(...$rows));
+                return $ins->rowCount();
+            };
+
+            $affected = 0;
+            $read     = 0;
+            $buf      = [];
+            $toP->beginTransaction();
+            try {
+                while ($row = $stmt->fetch(PDO::FETCH_NUM)) {
+                    $buf[] = $row;
+                    $read++;
+                    if (count($buf) === $batch) { $affected += $flush($buf); $buf = []; }
+                }
+                if ($buf) $affected += $flush($buf);
+                $toP->commit();
+            } catch (Throwable $e) {
+                if ($toP->inTransaction()) $toP->rollBack();
+                throw $e;
+            }
+
+            $sql = "$verb $toQ ($colList) VALUES (...)$dupSql  -- por lotes desde $fromQ$whereSql";
+            ok(['native' => false, 'sql' => $sql, 'affected' => $affected, 'read' => $read, 'skipped' => $skipped]);
         }
 
         // ── Filas de una tabla (modo single, paginación servidor) ─────────

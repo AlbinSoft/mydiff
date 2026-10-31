@@ -91,6 +91,8 @@ const connMgrOpen   = signal(false);
 const editingConn   = signal(null);
 const infoTableData   = signal(null);
 const schemaMergeOpen = signal(false);
+const defDiff         = signal(null);    // { kind:'TABLE'|'VIEW', srcName, trgName } - dialogo de estructura
+const transferOpen    = signal(false);
 
 // Routines
 const routineCmp  = signal(null);   // { triggers:{src,trg,both,diff,...}, functions:{...}, procedures:{...} }
@@ -117,6 +119,16 @@ effect(() => ssSet('panelOpen',   panelOpen.value));
 
 function busy(key, val) { busyKeys.value = { ...busyKeys.value, [key]: val }; }
 
+// Iconos de accion (por codigo para mantener el fuente en ASCII)
+const ICO_NEQ  = String.fromCharCode(0x2260);   // distinto
+const ICO_SWAP = String.fromCharCode(0x21C4);   // flechas opuestas
+const ICO_TRG  = String.fromCharCode(0x2192);   // flecha derecha
+const ICO_SRC  = String.fromCharCode(0x2190);   // flecha izquierda
+const ICO_RFSH = String.fromCharCode(0x21BB);   // flecha circular (refrescar)
+
+// Identificador entre backticks
+function bq(name) { return '`' + String(name).replace(/`/g, '``') + '`'; }
+
 // Trunca valores largos (text, json…) para mostrar en tabla
 function trunc(val, max = 128) {
     if (val == null) return '';
@@ -133,6 +145,44 @@ function addLog(entry) {
 async function loadConnections() {
     const data = await api('connections');
     connections.value = data.slice().sort((a, b) => a.name.localeCompare(b.name, 'es'));
+}
+
+// Refresco manual de BBDD: mantiene la seleccion salvo que la BD ya no exista
+async function refreshDBs() {
+    if (!srcId.value || !trgId.value) return;
+    busy('dbs', true);
+    try {
+        const cmp   = await api('compare_databases', { src: srcId.value, trg: trgId.value });
+        dbCmp.value = cmp;
+        addLog({ sql: 'SHOW DATABASES x 2 (refresco)', ok: true });
+        const lostSrc = srcDb.value && !cmp.src.includes(srcDb.value);
+        const lostTrg = trgDb.value && !cmp.trg.includes(trgDb.value);
+        if (lostSrc) srcDb.value = null;
+        if (lostTrg) trgDb.value = null;
+        if (lostSrc || lostTrg) {
+            srcTable.value   = null;
+            trgTable.value   = null;
+            tableCmp.value   = null;
+            dataCmp.value    = null;
+            routineCmp.value = null;
+        }
+    } catch (e) {
+        addLog({ sql: 'SHOW DATABASES x 2 (refresco)', ok: false, err: e.message });
+    } finally {
+        busy('dbs', false);
+    }
+}
+
+// Refresco manual de tablas, vistas y rutinas: mantiene la seleccion salvo lo que ya no exista
+async function refreshTables() {
+    const sDb = srcDb.value, tDb = trgDb.value;
+    if (!sDb || !tDb) return;
+    await Promise.all([compareTables(sDb, tDb, true), loadRoutines(sDb, tDb)]);
+    const cmp = tableCmp.value;
+    if (!cmp) return;
+    const exists = (side, name) => ['tables', 'views'].some(key => (cmp[key]?.[side] ?? []).includes(name));
+    if (srcTable.value && !exists('src', srcTable.value)) { srcTable.value = null; dataCmp.value = null; }
+    if (trgTable.value && !exists('trg', trgTable.value)) { trgTable.value = null; dataCmp.value = null; }
 }
 
 async function compareDBs() {
@@ -155,12 +205,15 @@ async function compareDBs() {
     }
 }
 
-async function compareTables(sDb, tDb) {
+// keepSel: refresca las listas sin perder la seleccion (p.ej. tras crear una tabla o vista)
+async function compareTables(sDb, tDb, keepSel = false) {
     if (!srcId.value || !trgId.value || !sDb || !tDb) return;
-    srcTable.value   = null;
-    trgTable.value   = null;
-    dataCmp.value    = null;
-    schemaDiff.value = { tables: [], views: [] };
+    if (!keepSel) {
+        srcTable.value   = null;
+        trgTable.value   = null;
+        dataCmp.value    = null;
+        schemaDiff.value = { tables: [], views: [] };
+    }
     busy('tables', true);
     try {
         tableCmp.value = await api('compare_tables', {
@@ -430,15 +483,6 @@ function RoutineDiffDialog() {
     const loading = srcSql === null || trgSql === null;
     const same    = !loading && norm(srcSql) === norm(trgSql);
 
-    const diffRows = !loading ? (() => {
-        let ln = 0, rn = 0;
-        return diffLines(norm(srcSql).split('\n'), norm(trgSql).split('\n')).map(row => ({
-            ...row,
-            lNum: row.t !== 'ad' ? ++ln : null,
-            rNum: row.t !== 'rm' ? ++rn : null,
-        }));
-    })() : [];
-
     return html`<div class="overlay" onClick=${e => e.target === e.currentTarget && close()}>
         <div class="modal routine-diff-modal">
             <div class="modal-title">${type} —
@@ -469,23 +513,266 @@ function RoutineDiffDialog() {
                     </div>
                 </div>
 
-                <div class="rdiff-wrap">
-                    <table class="rdiff-table">
-                        <tbody>
-                            ${diffRows.map((row, i) => html`<tr key=${i} class="rdiff-${row.t}">
-                                <td class="rdiff-ln">${row.lNum ?? ''}</td>
-                                <td class="rdiff-code">${row.l}</td>
-                                <td class="rdiff-sep"></td>
-                                <td class="rdiff-code">${row.r}</td>
-                                <td class="rdiff-ln">${row.rNum ?? ''}</td>
-                            </tr>`)}
-                        </tbody>
-                    </table>
-                </div>
+                <${DiffView} left=${norm(srcSql)} right=${norm(trgSql)} />
             </${Fragment}>`}
 
             <div class="modal-actions">
                 <button class="btn" onClick=${close}>Cerrar</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+// Diff lado a lado con numeros de linea (rutinas, vistas, tablas)
+function DiffView({ left, right }) {
+    let ln = 0, rn = 0;
+    const rows = diffLines(left.split('\n'), right.split('\n')).map(row => ({
+        ...row,
+        lNum: row.t !== 'ad' ? ++ln : null,
+        rNum: row.t !== 'rm' ? ++rn : null,
+    }));
+
+    return html`<div class="rdiff-wrap">
+        <table class="rdiff-table">
+            <tbody>
+                ${rows.map((row, i) => html`<tr key=${i} class="rdiff-${row.t}">
+                    <td class="rdiff-ln">${row.lNum ?? ''}</td>
+                    <td class="rdiff-code">${row.l}</td>
+                    <td class="rdiff-sep"></td>
+                    <td class="rdiff-code">${row.r}</td>
+                    <td class="rdiff-ln">${row.rNum ?? ''}</td>
+                </tr>`)}
+            </tbody>
+        </table>
+    </div>`;
+}
+
+// --- TABLE / VIEW DEFINITION DIALOG -------------------------------------------
+
+// Separa la cabecera de SHOW CREATE VIEW (ALGORITHM, DEFINER, SQL SECURITY) del SELECT
+function viewParts(sql) {
+    const match = /\bVIEW\s+((?:`(?:[^`]|``)+`\.)?`(?:[^`]|``)+`)\s+AS\s+([\s\S]*)$/i.exec(sql ?? '');
+    return match ? { name: match[1], body: match[2].trim() } : { name: '', body: (sql ?? '').trim() };
+}
+
+// MySQL devuelve el SELECT de una vista en una sola linea: lo partimos solo para mostrarlo
+function fmtSelect(body) {
+    return body
+        .replace(/\s+(from|where|(?:(?:inner|left|right|cross)\s+)?join|group\s+by|order\s+by|having|union(?:\s+all)?|limit)\s+/gi, '\n$1 ')
+        .replace(/(\sAS\s`(?:[^`]|``)+`),\s*/gi, '$1,\n    ');
+}
+
+function stripAutoInc(sql) {
+    return (sql ?? '').replace(/\s+AUTO_INCREMENT=\d+/i, '');
+}
+
+function DefDiffDialog() {
+    const { kind, srcName, trgName } = defDiff.value;
+    const sId = srcId.value, tId = trgId.value;
+    const sDb = srcDb.value, tDb = trgDb.value;
+    const isView = kind === 'VIEW';
+
+    const [srcSql,  setSrcSql]  = useState(null);
+    const [trgSql,  setTrgSql]  = useState(null);
+    const [running, setRunning] = useState(false);
+    const [msgs,    setMsgs]    = useState([]);
+
+    useEffect(() => {
+        const get = (connId, db, name) => name
+            ? api('get_routine', { connection_id: connId, db, type: kind, name }).then(d => d.sql)
+            : Promise.resolve('');
+        Promise.all([get(sId, sDb, srcName), get(tId, tDb, trgName)])
+            .then(([s, t]) => { setSrcSql(s); setTrgSql(t); })
+            .catch(e => { setMsgs([{ ok: false, text: e.message }]); setSrcSql(''); setTrgSql(''); });
+    }, []);
+
+    function close() { defDiff.value = null; }
+
+    // Texto que se muestra en el diff
+    function display(sql) {
+        if (!sql) return '';
+        if (!isView) return stripAutoInc(sql);
+        const { name, body } = viewParts(sql);
+        return `CREATE VIEW ${name} AS\n${fmtSelect(body)}`;
+    }
+
+    // Vista: CREATE OR REPLACE sin DEFINER. Tabla: CREATE TABLE (solo si no existe en destino)
+    function buildSql(fromSql, name) {
+        if (isView) return `CREATE OR REPLACE VIEW ${bq(name)} AS ${viewParts(fromSql).body}`;
+        return stripAutoInc(fromSql).replace(/^CREATE\s+TABLE\s+(?:`(?:[^`]|``)+`\.)?`(?:[^`]|``)+`/i, `CREATE TABLE ${bq(name)}`);
+    }
+
+    async function applyTo(side) {
+        const toTrg  = side === 'trg';
+        const name   = toTrg ? (trgName ?? srcName) : (srcName ?? trgName);
+        const connId = toTrg ? tId : sId;
+        const db     = toTrg ? tDb : sDb;
+        const sql    = buildSql(toTrg ? srcSql : trgSql, name);
+
+        setRunning(true); setMsgs([]);
+        try {
+            await api('query', { connection_id: connId, sql: b64sql(sql), db });
+            addLog({ sql, ok: true });
+            setMsgs([{ ok: true, text: `${kind} ${name} aplicado en ${side}` }]);
+            const fresh = await api('get_routine', { connection_id: connId, db, type: kind, name });
+            if (toTrg) setTrgSql(fresh.sql); else setSrcSql(fresh.sql);
+            compareTables(sDb, tDb, true);
+        } catch(e) {
+            setMsgs([{ ok: false, text: e.message }]);
+            addLog({ sql, ok: false, err: e.message });
+        } finally { setRunning(false); }
+    }
+
+    const loading = srcSql === null || trgSql === null;
+    const same    = !loading && (isView
+        ? viewParts(srcSql).body === viewParts(trgSql).body
+        : stripAutoInc(srcSql) === stripAutoInc(trgSql));
+
+    // Una tabla que ya existe en destino no se recrea (perderia los datos): para eso esta el schema merge
+    const canToTrg = !loading && !!srcSql && !same && (isView || !trgSql);
+    const canToSrc = !loading && !!trgSql && !same && (isView || !srcSql);
+    const verbTrg  = trgSql ? 'reemplazar' : 'crear';
+    const verbSrc  = srcSql ? 'reemplazar' : 'crear';
+    const title    = srcName && trgName && srcName !== trgName ? `${srcName} / ${trgName}` : (srcName ?? trgName);
+
+    return html`<div class="overlay" onClick=${e => e.target === e.currentTarget && close()}>
+        <div class="modal routine-diff-modal">
+            <div class="modal-title">${kind} -
+                <span style="font-family:var(--code);font-size:12px;font-weight:400">${title}</span>
+            </div>
+
+            ${msgs.length > 0 && html`<div style="margin-bottom:10px">
+                ${msgs.map((m, i) => html`<div key=${i} class="test-msg ${m.ok ? 'ok' : 'err'}">${m.ok ? 'OK ' : 'Error: '}${m.text}</div>`)}
+            </div>`}
+
+            ${loading && msgs.length === 0 && html`<div style="color:#666;padding:10px 0">Cargando...</div>`}
+
+            ${!loading && html`<${Fragment}>
+                <div class="rdiff-header">
+                    <div class="rdiff-header-side">
+                        <span style="font-family:var(--code);font-size:11px;color:#888">src: ${sDb}</span>
+                        ${canToTrg && html`
+                            <button class="btn btn-sm btn-accent" disabled=${running}
+                                onClick=${() => applyTo('trg')}>${ICO_TRG} ${verbTrg} en trg</button>
+                        `}
+                    </div>
+                    <div class="rdiff-header-side">
+                        ${canToSrc && html`
+                            <button class="btn btn-sm btn-accent" disabled=${running}
+                                onClick=${() => applyTo('src')}>${ICO_SRC} ${verbSrc} en src</button>
+                        `}
+                        <span style="font-family:var(--code);font-size:11px;color:#888">trg: ${tDb}</span>
+                    </div>
+                </div>
+
+                <${DiffView} left=${display(srcSql)} right=${display(trgSql)} />
+            </${Fragment}>`}
+
+            <div class="modal-actions">
+                <button class="btn" onClick=${close}>Cerrar</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+// --- TRANSFER DATA DIALOG -----------------------------------------------------
+
+const TRANSFER_MODES = [
+    { key: 'truncate', label: 'TRUNCATE + INSERT ... SELECT',                where: false },
+    { key: 'ignore',   label: 'INSERT IGNORE ... SELECT',                    where: true  },
+    { key: 'upsert',   label: 'INSERT ... SELECT ON DUPLICATE KEY UPDATE',   where: true  },
+];
+
+function TransferDialog() {
+    // Snapshot de la seleccion activa al abrir
+    const sId  = srcId.value,    tId  = trgId.value;
+    const sDb  = srcDb.value,    tDb  = trgDb.value;
+    const sTbl = srcTable.value, tTbl = trgTable.value;
+
+    const [dir,     setDir]     = useState('trg');      // lado destino
+    const [mode,    setMode]    = useState('ignore');
+    const [where,   setWhere]   = useState('');
+    const [running, setRunning] = useState(false);
+    const [msg,     setMsg]     = useState(null);
+
+    const toTrg   = dir === 'trg';
+    const from    = toTrg ? { id: sId, db: sDb, tbl: sTbl } : { id: tId, db: tDb, tbl: tTbl };
+    const to      = toTrg ? { id: tId, db: tDb, tbl: tTbl } : { id: sId, db: sDb, tbl: sTbl };
+    const modeDef = TRANSFER_MODES.find(m => m.key === mode);
+    const native  = sId === tId;
+
+    function close() { transferOpen.value = false; }
+
+    async function run() {
+        const label = `${from.db}.${from.tbl} ${ICO_TRG} ${to.db}.${to.tbl}`;
+        setRunning(true); setMsg(null);
+        try {
+            const res = await api('transfer_data', {
+                from: from.id, from_db: from.db, from_table: from.tbl,
+                to:   to.id,   to_db:   to.db,   to_table:   to.tbl,
+                mode,
+                where: b64sql(modeDef.where ? where.trim() : ''),
+            });
+            let text = `${res.affected} filas afectadas`;
+            if (res.read !== null)    text += ` (${res.read} leidas del origen)`;
+            if (res.skipped.length)   text += ` - columnas omitidas: ${res.skipped.join(', ')}`;
+            setMsg({ ok: true, text });
+            addLog({ sql: res.sql, ok: true, rows: res.affected });
+            loadData(0);
+        } catch(e) {
+            setMsg({ ok: false, text: e.message });
+            addLog({ sql: `Transferir ${label}`, ok: false, err: e.message });
+        } finally { setRunning(false); }
+    }
+
+    return html`<div class="overlay" onClick=${e => e.target === e.currentTarget && close()}>
+        <div class="modal transfer-modal">
+            <div class="modal-title">Transferir datos</div>
+
+            <div class="field">
+                <label>Sentido</label>
+                <div class="transfer-dir">
+                    <button class="btn btn-sm ${toTrg ? 'btn-accent' : ''}" onClick=${() => setDir('trg')}>src ${ICO_TRG} trg</button>
+                    <button class="btn btn-sm ${toTrg ? '' : 'btn-accent'}" onClick=${() => setDir('src')}>src ${ICO_SRC} trg</button>
+                </div>
+                <div class="transfer-route">${from.db}.${from.tbl} ${ICO_TRG} ${to.db}.${to.tbl}</div>
+            </div>
+
+            <div class="field">
+                <label>Modo</label>
+                ${TRANSFER_MODES.map(m => html`
+                    <label class="radio-row" key=${m.key}>
+                        <input type="radio" name="transfer-mode" checked=${mode === m.key} onChange=${() => setMode(m.key)} />
+                        <span>${m.label}</span>
+                    </label>
+                `)}
+            </div>
+
+            <div class="field">
+                <label>WHERE sobre el origen (opcional)</label>
+                <textarea class="schema-merge-textarea transfer-where"
+                    value=${modeDef.where ? where : ''}
+                    disabled=${!modeDef.where}
+                    onInput=${e => setWhere(e.target.value)}
+                    placeholder=${modeDef.where ? 'id > 1000 AND active = 1' : 'No se aplica con TRUNCATE'}
+                    spellcheck="false"
+                ></textarea>
+            </div>
+
+            <div class="transfer-note">
+                ${native
+                    ? 'Misma conexion: se ejecuta como SQL nativo.'
+                    : 'Conexiones distintas: PHP lee el origen e inserta por lotes en el destino.'}
+                ${' '}Solo se copian las columnas comunes a ambas tablas.
+            </div>
+
+            ${msg && html`<div class="test-msg ${msg.ok ? 'ok' : 'err'}">${msg.ok ? 'OK ' : 'Error: '}${msg.text}</div>`}
+
+            <div class="modal-actions">
+                <button class="btn" onClick=${close}>Cerrar</button>
+                <button class="btn btn-accent" disabled=${running} onClick=${run}>
+                    ${running ? '...' : `Ejecutar en ${dir}`}
+                </button>
             </div>
         </div>
     </div>`;
@@ -997,6 +1284,7 @@ function DatabasesPanel() {
         <div class="panel-toolbar ${open ? '' : 'no-border'}">
             <span class="fold-btn" onClick=${toggle}>${open ? html`<${ChevronDown}/>` : html`<${ChevronRight}/>`}</span>
             <span class="panel-title">Databases</span>
+            <button class="refresh-btn" title="Refrescar bases de datos" disabled=${isLoading} onClick=${refreshDBs}>${ICO_RFSH}</button>
             ${isLoading && html`<span class="loading-dot">…</span>`}
         </div>
         ${open && html`<div class="lists-row">
@@ -1071,6 +1359,43 @@ function TablesPanel() {
         else selectTrgTable(name);
     }
 
+    // Pareja seleccionada (una en cada lado) dentro de la pestana actual: habilita los iconos de accion
+    const kind    = tab === 'views' ? 'VIEW' : 'TABLE';
+    const pairSel = !isRoutine && allSrc.has(srcTable.value) && allTrg.has(trgTable.value);
+
+    function cmpData(e) {
+        e.stopPropagation();
+        panelOpen.value = { ...panelOpen.value, data: true };
+        loadData(0);
+    }
+    function cmpStruct(e) {
+        e.stopPropagation();
+        if (kind === 'VIEW') defDiff.value = { kind, srcName: srcTable.value, trgName: trgTable.value };
+        else schemaMergeOpen.value = true;
+    }
+    // Elemento que solo existe en un lado: abre su CREATE con el boton para crearlo en el otro
+    function sendTo(e, name, side) {
+        e.stopPropagation();
+        defDiff.value = side === 'trg'
+            ? { kind, srcName: name, trgName: null }
+            : { kind, srcName: null, trgName: name };
+    }
+
+    function actIcons(name, side, selected, missingOther) {
+        if (isRoutine) return null;
+        return html`<span class="list-icons">
+            ${selected && pairSel && html`
+                <span class="info-icon act-icon" title="Comparar datos" onClick=${cmpData}>${ICO_NEQ}</span>
+                <span class="info-icon act-icon" title="Comparar / clonar estructura" onClick=${cmpStruct}>${ICO_SWAP}</span>
+            `}
+            ${missingOther && html`
+                <span class="info-icon act-icon" title="Crear en ${side === 'src' ? 'trg' : 'src'}"
+                    onClick=${e => sendTo(e, name, side === 'src' ? 'trg' : 'src')}>${side === 'src' ? ICO_TRG : ICO_SRC}</span>
+            `}
+            <span class="info-icon" onClick=${e => showInfo(e, name, side)}>ℹ</span>
+        </span>`;
+    }
+
     return html`<div class="panel">
         <div class="panel-toolbar ${open ? '' : 'no-border'}">
             <span class="fold-btn" onClick=${toggle}>${open ? html`<${ChevronDown}/>` : html`<${ChevronRight}/>`}</span>
@@ -1081,6 +1406,8 @@ function TablesPanel() {
                 <span class="tab ${tab==='procedures' ? 'active':''}" onClick=${() => activeTab.value='procedures'}>Procedures</span>
                 <span class="tab ${tab==='triggers'   ? 'active':''}" onClick=${() => activeTab.value='triggers'}>Triggers</span>
             </div>
+            <button class="refresh-btn" title="Refrescar tablas, vistas y rutinas"
+                disabled=${busyKeys.value.tables || busyKeys.value.routines} onClick=${refreshTables}>${ICO_RFSH}</button>
             ${!isRoutine && html`<div class="panel-tools" style="margin-left:12px">
                 <button class="btn btn-sm schema-btn"
                     title="Comparar esquemas de ${tab === 'tables' ? 'tablas' : 'vistas'} comunes"
@@ -1106,7 +1433,7 @@ function TablesPanel() {
                         ${!isRoutine && srcTable.value === name ? 'selected' : ''}"
                         onClick=${() => onSrcClick(name)}>
                         <span>${name}</span>
-                        ${!isRoutine && html`<span class="info-icon" onClick=${e => showInfo(e, name, 'src')}>ℹ</span>`}
+                        ${actIcons(name, 'src', srcTable.value === name, !allTrg.has(name))}
                     </div>
                 `)}
             </div>
@@ -1119,7 +1446,7 @@ function TablesPanel() {
                         ${!isRoutine && trgTable.value === name ? 'selected' : ''}"
                         onClick=${() => onTrgClick(name)}>
                         <span>${name}</span>
-                        ${!isRoutine && html`<span class="info-icon" onClick=${e => showInfo(e, name, 'trg')}>ℹ</span>`}
+                        ${actIcons(name, 'trg', trgTable.value === name, !allSrc.has(name))}
                     </div>
                 `)}
             </div>
@@ -1220,6 +1547,7 @@ function DataPanel() {
                 </button>
                 ${hasSrc && hasTrg && html`
                     <button class="btn btn-sm" title="Schema merge" onClick=${() => schemaMergeOpen.value = true}>⇄</button>
+                    <button class="btn btn-sm" title="Transferir datos entre src y trg" onClick=${() => transferOpen.value = true}>transferir</button>
                 `}
                 <button class="btn btn-sm" title="Limpiar datos" onClick=${clearData}>✕</button>
             </div>
@@ -1412,6 +1740,8 @@ function MainApp() {
         ${connMgrOpen.value    && html`<${ConnManagerDialog} />`}
         ${schemaMergeOpen.value && html`<${SchemaMergeDialog} />`}
         ${routineDiff.value    && html`<${RoutineDiffDialog} />`}
+        ${defDiff.value        && html`<${DefDiffDialog} />`}
+        ${transferOpen.value   && html`<${TransferDialog} />`}
     </${Fragment}>`;
 }
 
