@@ -1,6 +1,6 @@
 import {
     html, render, Fragment,
-    signal, computed, effect,
+    signal, effect,
     useState, useEffect,
 } from './preact.js';
 
@@ -57,6 +57,21 @@ async function doLogout() {
     authenticated.value = false;
 }
 
+// Descarga la ultima version de GitHub en el servidor y recarga la pagina
+async function doUpdate() {
+    if (!confirm('Actualizar MyDiff a la ultima version de GitHub?')) return;
+    busy('update', true);
+    try {
+        const d = await api('update');
+        alert(`MyDiff actualizado (${d.files} ficheros). Se recargara la pagina.`);
+        location.reload();
+    } catch (e) {
+        alert('Error al actualizar: ' + e.message);
+    } finally {
+        busy('update', false);
+    }
+}
+
 // ─── STATE ────────────────────────────────────────────────────────────────────
 
 const connections  = signal([]);
@@ -85,7 +100,6 @@ const PANEL_DEFAULTS = { connections: true, databases: true, tables: true, data:
 const panelOpen    = signal({ ...PANEL_DEFAULTS, ...ssGet('panelOpen', {}) });
 
 // Diálogos
-const pickerFor    = signal(null);       // 'src' | 'trg' | null
 const connDlgOpen   = signal(false);
 const connMgrOpen   = signal(false);
 const editingConn   = signal(null);
@@ -97,11 +111,6 @@ const transferOpen    = signal(false);
 // Routines
 const routineCmp  = signal(null);   // { triggers:{src,trg,both,diff,...}, functions:{...}, procedures:{...} }
 const routineDiff = signal(null);   // { type, name } — abre el diálogo de diff
-
-// ─── COMPUTED ─────────────────────────────────────────────────────────────────
-
-const srcConn = computed(() => connections.value.find(c => c.id === srcId.value) ?? null);
-const trgConn = computed(() => connections.value.find(c => c.id === trgId.value) ?? null);
 
 // ─── PERSISTENCIA ────────────────────────────────────────────────────────────
 
@@ -302,6 +311,18 @@ function selectTrgDb(db) {
 }
 
 // Selección independiente de tabla — sin carga automática
+// Cambiar de conexion reinicia la comparacion; repetir la misma no hace nada
+function selectSrcConn(id) {
+    if (srcId.value === id) return;
+    srcId.value = id;
+    compareDBs();
+}
+function selectTrgConn(id) {
+    if (trgId.value === id) return;
+    trgId.value = id;
+    compareDBs();
+}
+
 function selectSrcTable(tbl) {
     srcTable.value = tbl;
     dataCmp.value  = null;
@@ -872,47 +893,6 @@ function ConnectionDialog() {
     </div>`;
 }
 
-// ─── CONNECTION PICKER ────────────────────────────────────────────────────────
-
-function ConnectionPicker() {
-    const side    = pickerFor.value;
-    const conns   = connections.value;
-    const current = side === 'src' ? srcId.value : trgId.value;
-
-    function pick(id) {
-        if (side === 'src') srcId.value = id;
-        else                trgId.value = id;
-        pickerFor.value = null;
-        compareDBs();
-    }
-    function editConn(e, c) {
-        e.stopPropagation();
-        editingConn.value = c; connDlgOpen.value = true; pickerFor.value = null;
-    }
-    function newConn() {
-        editingConn.value = null; connDlgOpen.value = true; pickerFor.value = null;
-    }
-    function close() { pickerFor.value = null; }
-
-    return html`<div class="overlay" onClick=${e => e.target === e.currentTarget && close()}>
-        <div class="modal">
-            <div class="modal-title">Conexión ${side === 'src' ? 'origen (src)' : 'destino (trg)'}</div>
-            ${conns.length === 0
-                ? html`<div style="color:#666;font-size:12px;margin-bottom:12px">Sin conexiones configuradas</div>`
-                : conns.map(c => html`
-                    <div class="picker-item ${c.id === current ? 'selected' : ''}" onClick=${() => pick(c.id)}>
-                        <div class="picker-name">${c.name}</div>
-                        <div class="picker-host">${c.host}:${c.port ?? 3306}</div>
-                        <button class="btn btn-sm" onClick=${e => editConn(e, c)}>✎</button>
-                    </div>
-                `)
-            }
-            <hr class="picker-sep" />
-            <button class="btn" style="width:100%" onClick=${newConn}>+ Nueva conexión</button>
-        </div>
-    </div>`;
-}
-
 // ─── TABLE INFO DIALOG ────────────────────────────────────────────────────────
 
 function TableInfoDialog() {
@@ -1224,7 +1204,9 @@ function Header() {
                 <circle cx="9" cy="9" r="8" stroke="#FF2777" stroke-width="1.5"/>
                 <text x="9" y="13.5" text-anchor="middle" fill="#FF2777" font-family="Inter" font-size="11">!</text>
             </svg>
-            <button class="btn btn-pill" title="Cerrar sesión" onClick=${doLogout}>Salir</button>
+            <button class="btn btn-pill" title="Actualizar desde GitHub"
+                disabled=${busyKeys.value.update} onClick=${doUpdate}>${busyKeys.value.update ? 'Updating...' : 'Update'}</button>
+            <button class="btn btn-pill" title="Cerrar sesión" onClick=${doLogout}>Exit</button>
         </div>
     </header>`;
 }
@@ -1232,33 +1214,37 @@ function Header() {
 // ─── CONNECTIONS PANEL ────────────────────────────────────────────────────────
 
 function ConnectionsPanel() {
-    const open = panelOpen.value.connections;
-    const src  = srcConn.value;
-    const trg  = trgConn.value;
+    const open  = panelOpen.value.connections;
+    const conns = connections.value;
 
     function toggle() { panelOpen.value = { ...panelOpen.value, connections: !open }; }
+
+    // Misma lista en los dos lados: a la izquierda se elige src y a la derecha trg
+    function connList(current, onPick) {
+        return conns.map(conn => html`
+            <div class="list-item ${current === conn.id ? 'selected' : ''}"
+                title="${conn.user}@${conn.host}:${conn.port ?? 3306}"
+                onClick=${() => onPick(conn.id)}>
+                ${conn.name}
+            </div>
+        `);
+    }
 
     return html`<div class="panel">
         <div class="panel-toolbar ${open ? '' : 'no-border'}">
             <span class="fold-btn" onClick=${toggle}>${open ? html`<${ChevronDown}/>` : html`<${ChevronRight}/>`}</span>
             <span class="panel-title">Connections</span>
             <div class="panel-tools">
-                <button class="btn btn-pill" onClick=${() => pickerFor.value = 'src'}>src</button>
-                <button class="btn btn-pill" onClick=${() => pickerFor.value = 'trg'}>trg</button>
                 <button class="btn btn-pill" title="Gestionar conexiones"
                     onClick=${() => connMgrOpen.value = true}>⚙</button>
             </div>
         </div>
-        ${open && html`<div class="conn-body">
-            <div class="conn-half">
-                <span class="conn-label">src</span>
-                <span class="conn-name ${src ? '' : 'conn-empty'}">${src ? src.name : '—'}</span>
-            </div>
-            <div class="conn-half">
-                <span class="conn-label">trg</span>
-                <span class="conn-name ${trg ? '' : 'conn-empty'}">${trg ? trg.name : '—'}</span>
-            </div>
-        </div>`}
+        ${open && (conns.length === 0
+            ? html`<div class="conn-empty">Sin conexiones configuradas. Crea una desde el gestor de conexiones.</div>`
+            : html`<div class="lists-row">
+                <div class="list-col">${connList(srcId.value, selectSrcConn)}</div>
+                <div class="list-col">${connList(trgId.value, selectTrgConn)}</div>
+            </div>`)}
     </div>`;
 }
 
@@ -1734,7 +1720,6 @@ function MainApp() {
             <${DataPanel} />
         </main>
         <${ConsolePanel} />
-        ${pickerFor.value      && html`<${ConnectionPicker} />`}
         ${connDlgOpen.value    && html`<${ConnectionDialog} />`}
         ${infoTableData.value  && html`<${TableInfoDialog} />`}
         ${connMgrOpen.value    && html`<${ConnManagerDialog} />`}

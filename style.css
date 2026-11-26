@@ -134,43 +134,11 @@ body {
 
 /* ── Connections panel ───────────────────────────────────────────────────── */
 
-.conn-body {
-    height: 40px;
-    display: flex;
-    align-items: center;
-    padding: 0 10px;
-}
-
-.conn-half {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-}
-
-.conn-half + .conn-half {
-    padding-left: 20px;
-    border-left: 2px solid var(--bg);
-}
-
-.conn-label {
-    color: var(--text);
+.conn-empty {
+    padding: 12px 38px;
     font-size: 12px;
-    flex-shrink: 0;
-    width: 20px;
+    color: #555;
 }
-
-.conn-name {
-    font-family: var(--code);
-    font-size: 14px;
-    color: #fff;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.conn-empty { color: #555; }
 
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 
@@ -485,27 +453,7 @@ table.diff-table {
 .test-msg.ok  { color: #4caf50; }
 .test-msg.err { color: var(--accent); }
 
-/* ── Picker list ─────────────────────────────────────────────────────────── */
-
-.picker-item {
-    display: flex;
-    align-items: center;
-    padding: 8px 10px;
-    border-radius: 6px;
-    cursor: pointer;
-    gap: 10px;
-    margin-bottom: 2px;
-}
-.picker-item:hover    { background: var(--item); }
-.picker-item.selected { background: var(--item); }
-
-.picker-name {
-    font-family: var(--code);
-    font-size: 13px;
-    color: var(--bright);
-    flex: 1;
-}
-.picker-host { font-size: 11px; color: #666; }
+/* ── Separador de dialogos ───────────────────────────────────────────────── */
 
 .picker-sep {
     border: none;

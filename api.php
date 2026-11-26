@@ -8,6 +8,10 @@ const CONN_FILE     = __DIR__ . '/connections.data.php';
 const CONN_FILE_OLD = __DIR__ . '/connections.json';
 const AUTH_FILE     = __DIR__ . '/auth_config.php';
 
+// Actualizacion desde GitHub (rama main)
+const UPDATE_URL       = 'https://github.com/AlbinSoft/mydiff/archive/refs/heads/main.zip';
+const UPDATE_PROTECTED = ['connections.data.php', 'connections.json', 'auth_config.php'];
+
 function atomicWrite(string $path, string $content): void {
     // Escribe a un temporal y renombra: evita dejar el fichero real a medias
     // si la escritura se interrumpe (visto en algunos hostings compartidos).
@@ -90,6 +94,84 @@ function viewBody(string $createSql): string {
     $body = $pos !== false ? substr($createSql, $pos) : $createSql;
     // Normaliza espacios para comparar
     return preg_replace('/\s+/', ' ', trim($body));
+}
+
+// ─── Actualizacion ───────────────────────────────────────────────────────────
+
+function downloadFile(string $url, string $dest): void {
+    if (function_exists('curl_init')) {
+        $fh = fopen($dest, 'wb');
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_FILE           => $fh,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_FAILONERROR    => true,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_TIMEOUT        => 120,
+            CURLOPT_USERAGENT      => 'MyDiff-updater',
+        ]);
+        $okDl = curl_exec($ch);
+        $err  = curl_error($ch);
+        curl_close($ch);
+        fclose($fh);
+        if (!$okDl) throw new RuntimeException("No se pudo descargar la actualizacion: $err");
+        return;
+    }
+    if (!ini_get('allow_url_fopen')) {
+        throw new RuntimeException('No se puede descargar: el servidor no tiene curl ni allow_url_fopen');
+    }
+    $ctx  = stream_context_create(['http' => ['user_agent' => 'MyDiff-updater', 'timeout' => 120]]);
+    $data = @file_get_contents($url, false, $ctx);
+    if ($data === false) throw new RuntimeException('No se pudo descargar la actualizacion');
+    if (file_put_contents($dest, $data) === false) throw new RuntimeException('No se pudo guardar la descarga');
+}
+
+// Descarga el zip de main y copia su contenido sobre la instalacion.
+// Devuelve el numero de ficheros escritos.
+function runUpdate(): int {
+    if (!class_exists('ZipArchive')) throw new RuntimeException('El servidor no tiene la extension zip de PHP');
+    if (!is_writable(__DIR__))       throw new RuntimeException('El directorio de la aplicacion no tiene permiso de escritura');
+
+    $zipPath = tempnam(sys_get_temp_dir(), 'mydiff');
+    try {
+        downloadFile(UPDATE_URL, $zipPath);
+
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath) !== true) throw new RuntimeException('La descarga no es un zip valido');
+
+        // El zip trae una unica carpeta raiz (mydiff-main/)
+        $first  = $zip->getNameIndex(0);
+        $root   = substr($first, 0, strpos($first, '/') + 1);
+        if ($root === '' || $zip->locateName($root . 'api.php') === false) {
+            $zip->close();
+            throw new RuntimeException('La descarga no contiene una version valida de MyDiff');
+        }
+
+        $files = 0;
+        for ($idx = 0; $idx < $zip->numFiles; $idx++) {
+            $name = $zip->getNameIndex($idx);
+            if (!str_starts_with($name, $root)) continue;
+            $rel  = substr($name, strlen($root));
+            if ($rel === '' || str_ends_with($rel, '/')) continue;                // carpetas
+            if (in_array($rel, UPDATE_PROTECTED, true)) continue;                 // datos locales
+            if (str_contains($rel, '..') || str_contains($rel, '\\')) continue;   // rutas sospechosas
+
+            $dest = __DIR__ . '/' . $rel;
+            $dir  = dirname($dest);
+            if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
+                throw new RuntimeException("No se pudo crear la carpeta $dir");
+            }
+            $content = $zip->getFromIndex($idx);
+            if ($content === false) throw new RuntimeException("No se pudo leer $rel del zip");
+            atomicWrite($dest, $content);
+            if ($rel === 'update.sh') @chmod($dest, 0755);
+            $files++;
+        }
+        $zip->close();
+        return $files;
+    } finally {
+        @unlink($zipPath);
+    }
 }
 
 // ─── Autenticación ────────────────────────────────────────────────────────────
@@ -189,6 +271,11 @@ try {
             writeAuthHash(password_hash($new, PASSWORD_DEFAULT));
             ok(true);
         }
+
+        // ── Actualizacion ────────────────────────────────────────────────────
+
+        case 'update':
+            ok(['files' => runUpdate()]);
 
         // ── Conexiones guardadas ───────────────────────────────────────────
 
