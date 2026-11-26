@@ -1197,7 +1197,7 @@ function Header() {
         <div class="header-brand">MyDiff</div>
         <div class="header-warning">
             <strong>Undoing is for cowards.</strong>
-            <em> All actions are executed inmediatly.</em>
+            <em> All actions are executed immediately.</em>
         </div>
         <div class="header-end">
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none">

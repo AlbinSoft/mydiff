@@ -2,3 +2,6 @@
 connections.json
 connections.data.php
 auth_config.php
+
+# Notas locales: no se versionan
+initial.md
